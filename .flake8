@@ -1,0 +1,9 @@
+[flake8]
+max-line-length = 88
+exclude =
+    .venv
+    __pycache__
+    app_fast.py
+    app_mvp.py
+    app_ws.py
+    streamlit_screenshot

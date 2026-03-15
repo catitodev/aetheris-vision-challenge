@@ -1,106 +1,69 @@
-import asyncio
-import base64
-import io
+# gemini_handler.py
+"""
+Helpers para conexão com Gemini Live.
+Fornece um async-generator `stream_response` que envia áudio (+opcional imagem)
+e retorna chunks de áudio (sample_rate, np.ndarray[int16]) produzidos pelo modelo.
+"""
+
 import os
-import time
-from dataclasses import dataclass
-from typing import AsyncGenerator, Optional, Tuple
+import logging
+from typing import Optional, AsyncGenerator
 
-from PIL import Image
+import numpy as np
+from dotenv import load_dotenv
 from google import genai
-from gradio_webrtc import AsyncAudioVideoStreamHandler
 
-@dataclass
-class LiveConfig:
-    model: str
-    enable_video: bool = True
-    video_fps: float = 1.0
-    ui_lang: str = "en"
+load_dotenv()
 
-class AetherisLiveHandler(AsyncAudioVideoStreamHandler):
-    def __init__(self) -> None:
-        super().__init__()
-        api_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
-        if not api_key:
-            raise RuntimeError("Missing API key.")
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("gemini_handler")
 
-        self.cfg = LiveConfig(
-            model=os.getenv("GEMINI_LIVE_MODEL", "gemini-2.0-flash-exp"),
-            enable_video=True,
-            video_fps=1.0,
-            ui_lang=os.getenv("AETHERIS_UI_LANG", "en"),
-        )
 
-        self.client = genai.Client(
-            api_key=api_key,
-            http_options={"api_version": "v1alpha"},
-        )
+def create_client() -> genai.Client:
+    """
+    Cria e retorna um cliente genai.Client a partir da variável de ambiente.
+    Lança RuntimeError se a chave não estiver configurada.
+    """
+    key = os.getenv("GEMINI_API_KEY")
+    if not key:
+        raise RuntimeError("GEMINI_API_KEY not set in environment")
+    client = genai.Client(api_key=key, http_options={"api_version": "v1alpha"})
+    logger.info("Gemini client initialized")
+    return client
 
-        self.session = None
-        self.session_active = False
-        self._last_video_ts = 0.0
-        self._lock = asyncio.Lock()
 
-    def copy(self):
-        return AetherisLiveHandler()
-
-    async def _connect(self) -> None:
-        async with self._lock:
-            if self.session_active:
-                return
-            config = {
-                "response_modalities": ["AUDIO"],
-                "system_instruction": "You are Aetheris. Be concise. Use the language the user speaks.",
+async def stream_response(
+    client: genai.Client,
+    audio_bytes: bytes,
+    image: Optional[np.ndarray] = None,
+    model: str = "gemini-2.0-flash-exp",
+) -> AsyncGenerator[tuple[int, np.ndarray], None]:
+    """
+    Async generator que envia áudio (bytes) e opcionalmente uma imagem (numpy array)
+    para o Gemini Live e produz chunks de áudio como (sample_rate, np.ndarray).
+    """
+    try:
+        async with client.aio.live.connect(
+            model=model, config={"response_modalities": ["AUDIO"]}
+        ) as session:
+            payload = {
+                "audio": {"data": audio_bytes, "mime_type": "audio/pcm;rate=16000"}
             }
-            self.session = await self.client.aio.live.connect(
-                model=self.cfg.model,
-                config=config,
-            )
-            self.session_active = True
+            if image is not None:
+                payload["image"] = image
 
-    async def receive(self, frame: Tuple[int, bytes]) -> None:
-        if not self.session_active:
-            await self._connect()
-        _, audio_data = frame
-        audio_b64 = base64.b64encode(audio_data).decode("utf-8")
-        try:
-            await self.session.send_realtime_input(
-                audio={"data": audio_b64, "mime_type": "audio/pcm;rate=16000"}
-            )
-        except:
-            self.session_active = False
+            await session.send_realtime_input(**payload)
+            await session.send_realtime_input(audio_stream_end=True)
 
-    async def video_receive(self, frame: Tuple[int, bytes]) -> None:
-        if not self.session_active or not self.cfg.enable_video:
-            return
-        now = time.time()
-        if now - self._last_video_ts < (1.0 / self.cfg.video_fps):
-            return
-        self._last_video_ts = now
-        _, image_bytes = frame
-        try:
-            img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=70)
-            await self.session.send_realtime_input(
-                video={"data": base64.b64encode(buf.getvalue()).decode("utf-8"), "mime_type": "image/jpeg"}
-            )
-        except:
-            pass
-
-    async def emit(self) -> AsyncGenerator[Tuple[int, bytes], None]:
-        if not self.session_active:
-            return
-        try:
-            async for resp in self.session.receive():
-                if hasattr(resp, "server_content") and resp.server_content:
-                    sc = resp.server_content
-                    if hasattr(sc, "model_turn") and sc.model_turn:
-                        for part in sc.model_turn.parts:
-                            if hasattr(part, "inline_data"):
-                                yield (24000, base64.b64decode(part.inline_data.data))
-        except:
-            self.session_active = False
-
-    async def video_emit(self) -> AsyncGenerator[Optional[Tuple[int, bytes]], None]:
-        yield None
+            async for response in session.receive():
+                if response.server_content and response.server_content.model_turn:
+                    for part in response.server_content.model_turn.parts:
+                        if part.inline_data:
+                            raw = part.inline_data.data
+                            arr = np.frombuffer(raw, dtype=np.int16)
+                            # yield (sample_rate, array)
+                            yield (24000, arr)
+    except Exception as exc:
+        # Evita except "bare" e loga stacktrace para debugging
+        logger.exception("Exception during stream_response: %s", exc)
+        raise
