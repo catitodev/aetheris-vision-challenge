@@ -4,3 +4,7 @@ __pycache__/
 .env
 .DS_Store
 Uploads/
+.env
+.env.*
+.env.example
+.env.exemple
