@@ -8,3 +8,6 @@ Uploads/
 .env.*
 .env.example
 .env.exemple
+.env
+.env.*
+.env.example
