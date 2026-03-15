@@ -4,9 +4,7 @@ Entrada principal para o MVP. Usa FastRTC Stream com ReplyOnPause para enviar
 áudio ao Gemini e aceita um input de imagem (snapshot) como contexto.
 """
 
-import os
 import logging
-import traceback
 
 import numpy as np
 import gradio as gr
@@ -66,7 +64,6 @@ async def aetheris_voice_with_image(audio, image=None):
             yield (sample_rate, arr)
     except Exception as exc:
         logger.exception("Erro no handler aetheris_voice_with_image: %s", exc)
-        # não re-raise; Stream deve lidar com a desconexão
 
 
 # Componente de imagem para a UI do Stream
