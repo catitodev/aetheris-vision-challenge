@@ -1,4 +1,4 @@
-fastrtc[vad]==0.1.5
+fastrtc==0.0.34
 gradio==5.23.3
 google-genai==1.3.0
 python-dotenv==1.0.1
